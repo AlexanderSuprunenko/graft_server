@@ -107,6 +107,8 @@ class manager_t
 	std::unique_ptr<ThreadPoolX> threadPool;
 	std::unique_ptr<TPResQueue> resQueue;
 public:
+	bool exit = false;
+public:
 	mg_mgr* get_mg_mgr() { return &mgr; }
 	ThreadPoolX& get_threadPool() { return *threadPool.get(); }
 	TPResQueue& get_resQueue() { return *resQueue.get(); }
@@ -341,7 +343,9 @@ public:
 		for (;;) 
 		{
 //			mg_mgr_poll(&mgr, 1000);
-			mg_mgr_poll(&mgr, -1);
+//			mg_mgr_poll(&mgr, -1);
+			mg_mgr_poll(&mgr, 1000);
+			if(manager.exit) break;
 		}
 		mg_mgr_free(&mgr);
 	}
@@ -355,6 +359,11 @@ private:
 		{
 			struct http_message *hm = (struct http_message *) ev_data;
 			std::string uri(hm->uri.p, hm->uri.len);
+			if(uri == "/root/exit")
+			{
+				manager.exit = true;
+				return;
+			}
 			std::string s_method(hm->method.p, hm->method.len);
 			int method = (s_method == "GET")? METHOD_GET: 1;
 			
@@ -430,6 +439,7 @@ public:
 		mg_connection *nc = mg_bind(&mgr, "1234", ev_handler);
 		for (;;) {
 		  mg_mgr_poll(&mgr, 1000);
+		  if(manager.exit) break;
 		}
 		mg_mgr_free(&mgr);
 	}
