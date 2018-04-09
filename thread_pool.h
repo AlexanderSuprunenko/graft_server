@@ -15,11 +15,10 @@ using fp_ms = std::chrono::duration<double, std::milli>;
 ///
 /// prototype of a job
 ///
-template <typename CR_ptr, typename Input, typename Output, typename Watcher>
+template <typename CR_ptr, typename Input, typename ResQueue, typename Watcher, typename Output>
 class GraftJob
 {
 public:
-	using ResQueue = MPMCBoundedQueue< GraftJob<CR_ptr, Input, Output, Watcher> >;
 
 	explicit GraftJob()
 	{}

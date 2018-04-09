@@ -34,7 +34,10 @@ class CryptoNodeSender;
 //////////////////////////////
 class manager_t;
 
-using GJ = GraftJob<ClientRequest_ptr, Router::JobParams, std::string, manager_t>;
+class GJ_ptr;
+using TPResQueue = MPMCBoundedQueue< GJ_ptr >;
+
+using GJ = GraftJob<ClientRequest_ptr, Router::JobParams, TPResQueue, manager_t, std::string>;
 
 //////////////
 /// \brief The GJ_ptr class
@@ -58,7 +61,8 @@ public:
 		return * this;
 	}
 
-	GJ_ptr() = delete;
+//	GJ_ptr() = delete;
+	explicit GJ_ptr() = default;
 	GJ_ptr(const GJ_ptr&) = delete;
 	GJ_ptr& operator = (const GJ_ptr&) = delete;
 	~GJ_ptr() = default;
@@ -72,6 +76,16 @@ public:
 	void operator ()(ARGS... args)
 	{
 		ptr.get()->operator () (args...);
+	}
+
+	GJ* operator ->()
+	{
+		return ptr.operator ->();
+	}
+
+	GJ& operator *()
+	{
+		return ptr.operator *();
 	}
 };
 
@@ -91,11 +105,11 @@ class manager_t
 	int cntJobDone = 0;
 
 	std::unique_ptr<ThreadPoolX> threadPool;
-	std::unique_ptr<GJ::ResQueue> resQueue;
+	std::unique_ptr<TPResQueue> resQueue;
 public:
 	mg_mgr* get_mg_mgr() { return &mgr; }
 	ThreadPoolX& get_threadPool() { return *threadPool.get(); }
-	GJ::ResQueue& get_resQueue() { return *resQueue.get(); }
+	TPResQueue& get_resQueue() { return *resQueue.get(); }
 	
 	void DoWork();
 
@@ -121,10 +135,10 @@ public:
 	void OnCryptonDone(CryptoNodeSender* cns);
 public:
 
-	void setThreadPool(ThreadPoolX&& tp, GJ::ResQueue&& rq)
+	void setThreadPool(ThreadPoolX&& tp, TPResQueue&& rq)
 	{
 		threadPool = std::unique_ptr<ThreadPoolX>(new ThreadPoolX(std::move(tp)));
-		resQueue = std::unique_ptr<GJ::ResQueue>(new GJ::ResQueue(std::move(rq)));
+		resQueue = std::unique_ptr<TPResQueue>(new TPResQueue(std::move(rq)));
 	}
 	
 	void notifyJobReady()
@@ -393,10 +407,10 @@ void manager_t::SendToThreadPool(ClientRequest_ptr cr)
 
 void manager_t::DoWork()
 {
-	GJ gj;
+	GJ_ptr gj;
 	bool res = manager.get_resQueue().pop(gj);
 	assert(res);
-	gj.cr->JobDone(std::move(gj));
+	gj->cr->JobDone(std::move(*gj));
 	++cntJobDone;
 }
 
@@ -464,7 +478,7 @@ void init_threadPool()
 
 	const size_t maxinputSize = th_op.threadCount()*th_op.queueSize();
 	assert(maxinputSize == th_op.threadCount()*th_op.queueSize());
-	GJ::ResQueue resQueue(resQueueSize);
+	TPResQueue resQueue(resQueueSize);
 	
 	manager.setThreadPool(std::move(thread_pool), std::move(resQueue));
 }
