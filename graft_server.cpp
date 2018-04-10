@@ -109,6 +109,22 @@ class manager_t
 public:
 	bool exit = false;
 public:
+	manager_t()
+	{
+		mg_mgr_init(&mgr, this, cb_event);
+	}
+
+	static manager_t* from(mg_mgr* mgr)
+	{
+		assert(mgr->user_data);
+		return static_cast<manager_t*>(mgr->user_data);
+	}
+
+	static manager_t* from(mg_connection* cn)
+	{
+		return from(cn->mgr);
+	}
+
 	mg_mgr* get_mg_mgr() { return &mgr; }
 	ThreadPoolX& get_threadPool() { return *threadPool.get(); }
 	TPResQueue& get_resQueue() { return *resQueue.get(); }
@@ -155,11 +171,9 @@ public:
 	static void cb_event(mg_mgr* mgr, uint64_t val);
 };
 
-manager_t manager;
-
 void manager_t::cb_event(mg_mgr* mgr, uint64_t val)
 {
-	manager.DoWork();
+	manager_t::from(mgr)->DoWork();
 }
 
 
@@ -213,7 +227,7 @@ public:
 	
 	CryptoNodeSender() = default;
 	
-	void send(ClientRequest_ptr cr_, std::string& data_)
+	void send(manager_t& manager, ClientRequest_ptr cr_, std::string& data_)
 	{
 		cr = cr_;
 		data = data_;
@@ -234,7 +248,7 @@ public:
 			mbuf& buf = crypton->recv_mbuf;
 			result = std::string(buf.buf, buf.len);
 			crypton->flags |= MG_F_CLOSE_IMMEDIATELY;
-			manager.OnCryptonDone(this);
+			manager_t::from(crypton)->OnCryptonDone(this);
 			crypton->handler = static_empty_ev_handler;
 			Release();
 		} break;
@@ -281,7 +295,7 @@ public:
 		Release();
 	}
 	
-	void CreateJob()
+	void CreateJob(manager_t& manager)
 	{
 		manager.get_threadPool().post(
 			GJ_ptr( getItself(), Router::JobParams(prms), &manager.get_resQueue(), &manager )
@@ -316,7 +330,7 @@ public:
 			assert(getItself());
 			if(getItself()) break;
 			state = State::Delete;
-			manager.OnClientDone(getItself());
+			manager_t::from(client)->OnClientDone(getItself());
 			client->handler = static_empty_ev_handler;
 			Release();
 		} break;
@@ -329,25 +343,24 @@ public:
 class GraftServer final
 {
 	static Router router;
+	manager_t& manager;
 public:	
 	static Router& get_router() { return router; }
-	GraftServer()
+	GraftServer(manager_t& manager) : manager(manager)
 	{ }
 	
 	void serve(const char* s_http_port)
 	{
-		mg_mgr& mgr = *manager.get_mg_mgr();
-		mg_mgr_init(&mgr, NULL, manager.cb_event);
-		mg_connection* nc = mg_bind(&mgr, s_http_port, ev_handler);
+		mg_mgr* mgr = manager.get_mg_mgr();
+		mg_connection* nc = mg_bind(mgr, s_http_port, ev_handler);
 		mg_set_protocol_http_websocket(nc);
 		for (;;) 
 		{
-//			mg_mgr_poll(&mgr, 1000);
-//			mg_mgr_poll(&mgr, -1);
-			mg_mgr_poll(&mgr, 1000);
-			if(manager.exit) break;
+//			mg_mgr_poll(mgr, -1);
+			mg_mgr_poll(mgr, 1000);
+			if(manager_t::from(mgr)->exit) break;
 		}
-		mg_mgr_free(&mgr);
+		mg_mgr_free(mgr);
 	}
 
 private:
@@ -361,7 +374,7 @@ private:
 			std::string uri(hm->uri.p, hm->uri.len);
 			if(uri == "/root/exit")
 			{
-				manager.exit = true;
+				manager_t::from(client)->exit = true;
 				return;
 			}
 			std::string s_method(hm->method.p, hm->method.len);
@@ -378,7 +391,7 @@ private:
 				//
 				//if to cropton
 				
-				manager.OnNewClient( ptr->getItself() );
+				manager_t::from(client)->OnNewClient( ptr->getItself() );
 			}
 			else
 			{
@@ -406,18 +419,18 @@ void manager_t::SendCrypton(ClientRequest_ptr cr)
 			something[i] = s[i];
 		}
 	}
-	cns->send(cr, something );
+	cns->send(*this, cr, something );
 }
 
 void manager_t::SendToThreadPool(ClientRequest_ptr cr)
 {
-	cr->CreateJob();
+	cr->CreateJob(*this);
 }
 
 void manager_t::DoWork()
 {
 	GJ_ptr gj;
-	bool res = manager.get_resQueue().pop(gj);
+	bool res = get_resQueue().pop(gj);
 	assert(res);
 	gj->cr->JobDone(std::move(*gj));
 	++cntJobDone;
@@ -429,17 +442,18 @@ void manager_t::OnCryptonDone(CryptoNodeSender* cns)
 	cns->cr->AnswerOk();
 }
 
+//Temporary server to simulate CryptoNode
 class cryptoNodeServer
 {
 public:
-	static void run()
+	static void run(manager_t& extern_manager)
 	{
 		mg_mgr mgr;
 		mg_mgr_init(&mgr, NULL, 0);
 		mg_connection *nc = mg_bind(&mgr, "1234", ev_handler);
 		for (;;) {
 		  mg_mgr_poll(&mgr, 1000);
-		  if(manager.exit) break;
+		  if(extern_manager.exit) break;
 		}
 		mg_mgr_free(&mgr);
 	}
@@ -470,7 +484,7 @@ bool test(Router::vars_t& vars, const std::string& input, std::string& output)
 	return true;
 }
 
-void init_threadPool()
+void init_threadPool(manager_t& manager)
 {
 	ThreadPoolOptions th_op;
 //		th_op.setThreadCount(3);
@@ -495,10 +509,11 @@ void init_threadPool()
 
 int main(int argc, char *argv[]) 
 {
-	std::thread t(cryptoNodeServer::run);
+	manager_t manager;
+	std::thread t([&manager]{ cryptoNodeServer::run(manager); });
 	
-	GraftServer gs; //router);
-	init_threadPool();
+	GraftServer gs(manager); //router);
+	init_threadPool(manager);
 	{
 		static Router::Handler p = test;
 		Router& router = gs.get_router();
