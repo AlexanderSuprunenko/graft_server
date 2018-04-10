@@ -97,6 +97,7 @@ using ThreadPoolX = ThreadPoolImpl<FixedFunction<void(), sizeof(GJ_ptr)>,
 class manager_t
 {
 	mg_mgr mgr;
+	Router& router;
 
 	int cntClientRequest = 0;
 	int cntClientRequestDone = 0;
@@ -109,7 +110,8 @@ class manager_t
 public:
 	bool exit = false;
 public:
-	manager_t()
+	manager_t(Router& router)
+		: router(router)
 	{
 		mg_mgr_init(&mgr, this, cb_event);
 	}
@@ -126,6 +128,7 @@ public:
 	}
 
 	mg_mgr* get_mg_mgr() { return &mgr; }
+	Router& get_Router() { return router; }
 	ThreadPoolX& get_threadPool() { return *threadPool.get(); }
 	TPResQueue& get_resQueue() { return *resQueue.get(); }
 	
@@ -342,10 +345,8 @@ public:
 
 class GraftServer final
 {
-	static Router router;
 	manager_t& manager;
 public:	
-	static Router& get_router() { return router; }
 	GraftServer(manager_t& manager) : manager(manager)
 	{ }
 	
@@ -372,14 +373,16 @@ private:
 		{
 			struct http_message *hm = (struct http_message *) ev_data;
 			std::string uri(hm->uri.p, hm->uri.len);
+			manager_t* manager = manager_t::from(client);
 			if(uri == "/root/exit")
 			{
-				manager_t::from(client)->exit = true;
+				manager->exit = true;
 				return;
 			}
 			std::string s_method(hm->method.p, hm->method.len);
 			int method = (s_method == "GET")? METHOD_GET: 1;
-			
+
+			Router& router = manager->get_Router();
 			Router::JobParams prms;
 			if(router.match(uri, method, prms))
 			{
@@ -404,8 +407,6 @@ private:
 		}
 	}
 };
-
-Router GraftServer::router;
 
 void manager_t::SendCrypton(ClientRequest_ptr cr)
 {
@@ -509,14 +510,9 @@ void init_threadPool(manager_t& manager)
 
 int main(int argc, char *argv[]) 
 {
-	manager_t manager;
-	std::thread t([&manager]{ cryptoNodeServer::run(manager); });
-	
-	GraftServer gs(manager); //router);
-	init_threadPool(manager);
+	Router router;
 	{
 		static Router::Handler p = test;
-		Router& router = gs.get_router();
 		router.addRoute("/root/r{id:\\d+}", METHOD_GET, &p);
 		router.addRoute("/root/aaa/{s1}/bbb/{s2}", METHOD_GET, &p);
 //		router.addRoute("/root/rr{id:\\d+}", METHOD_GET, test);
@@ -524,6 +520,12 @@ int main(int argc, char *argv[])
 		bool res = router.arm();
 		assert(res);
 	}
+	manager_t manager(router);
+
+	std::thread t([&manager]{ cryptoNodeServer::run(manager); });
+
+	init_threadPool(manager);
+	GraftServer gs(manager);
 	gs.serve("9084");
 	
 	t.join();
