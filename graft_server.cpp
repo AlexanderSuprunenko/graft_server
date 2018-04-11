@@ -99,14 +99,20 @@ class manager_t
 	mg_mgr mgr;
 	Router& router;
 
-	int cntClientRequest = 0;
-	int cntClientRequestDone = 0;
-	int cntCryptoNodeSender = 0;
-	int cntCryptoNodeSenderDone = 0;
-	int cntJobDone = 0;
+	uint64_t cntClientRequest = 0;
+	uint64_t cntClientRequestDone = 0;
+	uint64_t cntCryptoNodeSender = 0;
+	uint64_t cntCryptoNodeSenderDone = 0;
+	uint64_t cntJobSent = 0;
+	uint64_t cntJobDone = 0;
 
+	uint64_t tp_InputSize = 0;
 	std::unique_ptr<ThreadPoolX> threadPool;
 	std::unique_ptr<TPResQueue> resQueue;
+
+private:
+	bool tryProcessReadyJob();
+	void processReadyJobBlock();
 public:
 	bool exit = false;
 public:
@@ -132,7 +138,7 @@ public:
 	ThreadPoolX& get_threadPool() { return *threadPool.get(); }
 	TPResQueue& get_resQueue() { return *resQueue.get(); }
 	
-	void DoWork();
+	void DoWork(uint64_t cnt);
 
 	void OnNewClient(ClientRequest_ptr cr)
 	{
@@ -156,10 +162,11 @@ public:
 	void OnCryptonDone(CryptoNodeSender* cns);
 public:
 
-	void setThreadPool(ThreadPoolX&& tp, TPResQueue&& rq)
+	void setThreadPool(ThreadPoolX&& tp, TPResQueue&& rq, uint64_t tp_InputSize_)
 	{
 		threadPool = std::unique_ptr<ThreadPoolX>(new ThreadPoolX(std::move(tp)));
 		resQueue = std::unique_ptr<TPResQueue>(new TPResQueue(std::move(rq)));
+		tp_InputSize = tp_InputSize_;
 	}
 	
 	void notifyJobReady()
@@ -174,9 +181,9 @@ public:
 	static void cb_event(mg_mgr* mgr, uint64_t val);
 };
 
-void manager_t::cb_event(mg_mgr* mgr, uint64_t val)
+void manager_t::cb_event(mg_mgr* mgr, uint64_t cnt)
 {
-	manager_t::from(mgr)->DoWork();
+	manager_t::from(mgr)->DoWork(cnt);
 }
 
 
@@ -274,6 +281,7 @@ class ClientRequest : public ItselfHolder<ClientRequest>, public StaticMongooseH
 	};
 	
 	Router::JobParams prms;
+//	Context 
 	State state;
 	mg_connection *client;
 public:	
@@ -425,16 +433,51 @@ void manager_t::SendCrypton(ClientRequest_ptr cr)
 
 void manager_t::SendToThreadPool(ClientRequest_ptr cr)
 {
+	assert(cntJobDone <= cntJobSent);
+	if(cntJobDone - cntJobSent == tp_InputSize)
+//	if(0 < cntJobDone - cntJobSent)
+	{//check overflow
+		processReadyJobBlock();
+	}
+	assert(cntJobDone - cntJobSent < tp_InputSize);
+	++cntJobSent;
 	cr->CreateJob(*this);
 }
 
-void manager_t::DoWork()
+bool manager_t::tryProcessReadyJob()
 {
 	GJ_ptr gj;
 	bool res = get_resQueue().pop(gj);
-	assert(res);
+	if(!res) return res;
 	gj->cr->JobDone(std::move(*gj));
 	++cntJobDone;
+	return true;
+}
+
+void manager_t::processReadyJobBlock()
+{
+	while(true)
+	{
+		bool res = tryProcessReadyJob();
+		if(res) break;
+	}
+}
+
+void manager_t::DoWork(uint64_t cnt)
+{
+/* job overflow is possible when we pop jobs without notification, thus cnt 
+	for(uint64_t i; i<cnt; ++i)
+	{
+		bool res = tryProcessReadyJop();
+		assert(res);
+	}
+*/
+	bool res = true;
+	while(res)
+	{
+		res = tryProcessReadyJob();
+		if(!res) break;
+	}
 }
 
 void manager_t::OnCryptonDone(CryptoNodeSender* cns)
@@ -482,6 +525,7 @@ private:
 
 bool test(Router::vars_t& vars, const std::string& input, std::string& output)
 {
+//	std::this_thread::sleep_for(std::chrono::milliseconds(10000));
 	return true;
 }
 
@@ -505,7 +549,7 @@ void init_threadPool(manager_t& manager)
 	assert(maxinputSize == th_op.threadCount()*th_op.queueSize());
 	TPResQueue resQueue(resQueueSize);
 	
-	manager.setThreadPool(std::move(thread_pool), std::move(resQueue));
+	manager.setThreadPool(std::move(thread_pool), std::move(resQueue), maxinputSize);
 }
 
 int main(int argc, char *argv[]) 
