@@ -2,7 +2,7 @@
 
 #include <thread_pool.hpp>
 
-using namespace tp;
+//using namespace tp;
 
 ///////
 //time measurement helpers
